@@ -29,6 +29,11 @@ public class PagoTdcRoute extends RouteBuilder {
                 .maximumRedeliveries(1)
                 .handled(true)
                 .to("kafka:pagos.tdc.dlq");
+        errorHandler(deadLetterChannel("kafka:pagos.tdc.dlq?brokers=localhost:9092")
+                .maximumRedeliveries(3)
+                .redeliveryDelay(2000)
+                .retryAttemptedLogLevel(LoggingLevel.WARN));
+
 
 
         from("direct:inicioPago")
@@ -52,8 +57,9 @@ public class PagoTdcRoute extends RouteBuilder {
                 .to("http://localhost:8081/servicio/pago")
                 .onFallback()
                 .log("Fallback activado: servicio de pago no disponible")
-                .to("kafka:pagos.tdc.compensacion")
+                .to("direct:compensacion")
                 .end()
+
                 .multicast().parallelProcessing()
                 .to("direct:notificar", "direct:auditar")
                 .end()
@@ -62,6 +68,10 @@ public class PagoTdcRoute extends RouteBuilder {
         from("kafka:pagos.tdc.compensacion")
                 .log("Compensando pago fallido: ${body}")
                 .to("bean:compensacionService?method=compensar");
+
+        from("direct:compensacion")
+                .log("Ejecutando lógica de compensación...")
+                .to("kafka:pagos.tdc.compensacion?brokers=localhost:9092");
 
 
 
