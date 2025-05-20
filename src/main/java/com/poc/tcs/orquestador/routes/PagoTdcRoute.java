@@ -1,4 +1,4 @@
-package com.poc.tcs.Orquestador.routes;
+package com.poc.tcs.orquestador.routes;
 
 import org.apache.camel.builder.RouteBuilder;
 import org.springframework.stereotype.Component;
@@ -16,13 +16,22 @@ public class PagoTdcRoute extends RouteBuilder {
         from("direct:procesarPago")
                 .log("Procesando pago...")
                 .doTry()
-                .to("http://localhost:8081/servicio/pago") // Simulado
-                .log("Pago procesado correctamente")
+                .to("http://localhost:8081/servicio/pago")
+                .multicast().parallelProcessing()
+                .to("direct:notificar", "direct:auditar")
+                .endDoTry()
                 .to("kafka:pagos.tdc.ok?brokers=localhost:9092")
-                .doCatch(Exception.class)
+                .doCatch (Exception.class)
                 .log("Error en el pago: ${exception.message}")
-                .to("kafka:pagos.tdc.retry")
+                .to("kafka:pagos.tdc.retry?brokers=localhost:9092")
                 .end();
+
+        from("direct:notificar")
+                .log("Notificando al cliente del pago...");
+
+        from("direct:auditar")
+                .log("Auditando operación para cumplimiento...");
+
     }
 }
 

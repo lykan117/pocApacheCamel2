@@ -1,4 +1,4 @@
-package com.poc.tcs.Orquestador;
+package com.poc.tcs.orquestador;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;

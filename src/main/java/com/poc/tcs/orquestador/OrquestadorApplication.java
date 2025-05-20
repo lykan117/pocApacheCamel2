@@ -1,4 +1,4 @@
-package com.poc.tcs.Orquestador;
+package com.poc.tcs.orquestador;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
