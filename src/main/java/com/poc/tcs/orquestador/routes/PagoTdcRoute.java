@@ -1,14 +1,20 @@
 package com.poc.tcs.orquestador.routes;
 
+import com.poc.tcs.orquestador.mericas.CustomMetrics;
 import com.poc.tcs.orquestador.util.EncryptionUtils;
 import org.apache.camel.LoggingLevel;
 import org.apache.camel.builder.RouteBuilder;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.net.ConnectException;
 
 @Component
 public class PagoTdcRoute extends RouteBuilder {
+
+    @Autowired
+    private CustomMetrics customMetrics;
+
     @Override
     public void configure() throws Exception {
 
@@ -18,6 +24,11 @@ public class PagoTdcRoute extends RouteBuilder {
 //                .retryAttemptedLogLevel(LoggingLevel.WARN)
 //                .handled(true)
 //                .to("kafka:pagos.tdc.dlq");
+
+        errorHandler(deadLetterChannel("kafka:pagos.tdc.dlq")
+                .maximumRedeliveries(3)
+                .redeliveryDelay(2000)
+                .retryAttemptedLogLevel(LoggingLevel.WARN));
         onException(ConnectException.class)
                 .maximumRedeliveries(5)
                 .redeliveryDelay(3000)
@@ -29,14 +40,18 @@ public class PagoTdcRoute extends RouteBuilder {
                 .maximumRedeliveries(1)
                 .handled(true)
                 .to("kafka:pagos.tdc.dlq");
-        errorHandler(deadLetterChannel("kafka:pagos.tdc.dlq?brokers=localhost:9092")
-                .maximumRedeliveries(3)
-                .redeliveryDelay(2000)
-                .retryAttemptedLogLevel(LoggingLevel.WARN));
+
 
 
 
         from("direct:inicioPago")
+                .throttle(10).timePeriodMillis(1000)
+                .process(exchange -> {
+                    String id = exchange.getExchangeId();
+                    exchange.getIn().setHeader("correlationId", id);
+                    exchange.getMessage().setHeader("X-Correlation-Id", id);
+                    log.info("Correlation ID: " + id);
+                })
                 .process(exchange -> {
                     String tarjeta = exchange.getIn().getHeader("numTarjeta", String.class);
                     String cifrada = EncryptionUtils.encrypt(tarjeta);
@@ -55,15 +70,17 @@ public class PagoTdcRoute extends RouteBuilder {
                 .slidingWindowSize(4)
                 .end()
                 .to("http://localhost:8081/servicio/pago")
+                .process(exchange -> customMetrics.registrarPagoExitoso())
                 .onFallback()
                 .log("Fallback activado: servicio de pago no disponible")
+                .process(exchange -> customMetrics.registrarPagoFallido())
                 .to("direct:compensacion")
                 .end()
 
                 .multicast().parallelProcessing()
                 .to("direct:notificar", "direct:auditar")
                 .end()
-                .to("kafka:pagos.tdc.ok?brokers=localhost:9092");
+                .to("kafka:pagos.tdc.ok");
 
         from("kafka:pagos.tdc.compensacion")
                 .log("Compensando pago fallido: ${body}")
@@ -71,8 +88,17 @@ public class PagoTdcRoute extends RouteBuilder {
 
         from("direct:compensacion")
                 .log("Ejecutando lógica de compensación...")
-                .to("kafka:pagos.tdc.compensacion?brokers=localhost:9092");
+                .to("kafka:pagos.tdc.compensacion");
 
+        from("direct:dlq")
+                .log("Mensaje enviado a DLQ")
+                .to("kafka:pagos.tdc.dlq");
+
+        from("direct:notificar")
+                .log("Notificando al cliente del pago... ${body}");
+
+        from("direct:auditar")
+                .log("Auditando operación para cumplimiento... ${body}");
 
 
 
