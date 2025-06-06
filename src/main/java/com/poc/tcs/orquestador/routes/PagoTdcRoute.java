@@ -17,8 +17,6 @@ import java.util.Map;
 @Component
 public class PagoTdcRoute extends RouteBuilder {
 
-    //@Autowired
-    //private CustomMetrics customMetrics;
 
     @Override
     public void configure() throws Exception {
@@ -108,7 +106,7 @@ public class PagoTdcRoute extends RouteBuilder {
                 .to("kafka:trazabilidad-events?brokers=localhost:9092")
 
                 .onFallback()
-                .log("🔥 Fallback activado, enviando a retry topic pagos.tdc.retry")
+                .log("Fallback activado, enviando a retry topic pagos.tdc.retry")
                 .to("kafka:pagos.tdc.retry?brokers=localhost:9092")
                 .end()
 
@@ -128,7 +126,7 @@ public class PagoTdcRoute extends RouteBuilder {
                 .to("kafka:pagosTdcCompensacion?brokers=localhost:9092");
 
         from("kafka:pagos.tdc.retry?brokers=localhost:9092")
-                .log("🔁 Reintentando compensación desde retry topic...")
+                .log("Reintentando compensación desde retry topic...")
                 .setHeader("Content-Type", constant("application/json"))
                 .marshal().json(JsonLibrary.Jackson)
                 .toD("http://localhost:8090/mock-pago-aleatorio?bridgeEndpoint=true&httpMethod=POST")
