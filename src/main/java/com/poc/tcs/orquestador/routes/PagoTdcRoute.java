@@ -2,8 +2,10 @@ package com.poc.tcs.orquestador.routes;
 
 import com.poc.tcs.orquestador.dto.PagoRequest;
 import com.poc.tcs.orquestador.util.EncryptionUtils;
+import org.apache.camel.Exchange;
 import org.apache.camel.LoggingLevel;
 import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.model.dataformat.JsonLibrary;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -21,28 +23,21 @@ public class PagoTdcRoute extends RouteBuilder {
     @Override
     public void configure() throws Exception {
 
-//        onException(Exception.class)
-//                .maximumRedeliveries(3)
-//                .redeliveryDelay(2000)
-//                .retryAttemptedLogLevel(LoggingLevel.WARN)
-//                .handled(true)
-//                .to("kafka:pagos.tdc.dlq");
 
-        errorHandler(deadLetterChannel("kafka:pagosTdcDlq?brokers=localhost:9092")
+
+
+        onException(Exception.class)
                 .maximumRedeliveries(3)
-                .redeliveryDelay(2000)
-                .retryAttemptedLogLevel(LoggingLevel.WARN));
-        onException(ConnectException.class)
-                .maximumRedeliveries(5)
                 .redeliveryDelay(3000)
-                .retryAttemptedLogLevel(LoggingLevel.WARN)
-                .handled(true)
-                .to("kafka:pagosTdcRetry?brokers=localhost:9092");
+                .onRedelivery(exchange -> {
+                    int counter = exchange.getIn().getHeader(Exchange.REDELIVERY_COUNTER, Integer.class) != null ?
+                            exchange.getIn().getHeader(Exchange.REDELIVERY_COUNTER, Integer.class) + 1 : 1;
+                    log.warn("🔁 Reintentando operación... intento {}", counter);
 
-        onException(RuntimeException.class)
-                .maximumRedeliveries(1)
+                })
                 .handled(true)
-                .to("kafka:pagosTdcDlq?brokers=localhost:9092");
+                .log("Error capturado: ${exception.message}")
+                .to("direct:dlq");
 
 
         from("direct:inicioPago")
@@ -73,23 +68,6 @@ public class PagoTdcRoute extends RouteBuilder {
                 .to("direct:procesarPago");
 
 
-//        from("direct:inicioPago")
-//                .throttle(10).timePeriodMillis(1000)
-//                .process(exchange -> {
-//                    String id = exchange.getExchangeId();
-//                    exchange.getIn().setHeader("correlationId", id);
-//                    exchange.getMessage().setHeader("X-Correlation-Id", id);
-//                    log.info("Correlation ID: " + id);
-//                })
-//                .process(exchange -> {
-//                    String tarjeta = exchange.getIn().getHeader("numeroCuenta", String.class);
-//                    String cifrada = EncryptionUtils.encrypt(tarjeta);
-//                    exchange.getIn().setHeader("numeroCuenta", cifrada);
-//                   System.out.println("si paso aqui");// .log.info
-//                })
-//                .to("kafka:pagostdcRequest?brokers=localhost:9092")
-//                .to("direct:procesarPago");
-
         from("direct:procesarPago")
                 .log("Procesando pago con resiliencia...")
                 .circuitBreaker()
@@ -98,8 +76,14 @@ public class PagoTdcRoute extends RouteBuilder {
                 .waitDurationInOpenState(5000)
                 .permittedNumberOfCallsInHalfOpenState(2)
                 .slidingWindowSize(4)
+                .timeoutEnabled(true)
+                .timeoutDuration(3000)
                 .end()
-                .to("http://localhost:8090/mock-pago-ok")//http://localhost:8090/mock-pago-error
+
+
+                .setHeader("Content-Type", constant("application/json"))
+                .marshal().json(JsonLibrary.Jackson)
+                .toD("http://localhost:8090/mock-pago-error?bridgeEndpoint=true&httpMethod=POST")
                 .process(exchange -> {
                     Map<String, Object> evento = new HashMap<>();
                     evento.put("evento", "pago_exitoso");
@@ -122,7 +106,10 @@ public class PagoTdcRoute extends RouteBuilder {
                 })
                 .marshal().json()
                 .to("kafka:trazabilidad-events?brokers=localhost:9092")
-                .to("direct:compensacion")
+
+                .onFallback()
+                .log("🔥 Fallback activado, enviando a retry topic pagos.tdc.retry")
+                .to("kafka:pagos.tdc.retry?brokers=localhost:9092")
                 .end()
 
                 .multicast().parallelProcessing()
@@ -131,17 +118,45 @@ public class PagoTdcRoute extends RouteBuilder {
                 .to("kafka:pagosTdcOK?brokers=localhost:9092");
 
 
-        from("kafka:pagos.tdc.compensacion?brokers=localhost:9092")
-                .log("Compensando pago fallido: ${body}")
-                .to("bean:compensacionService?method=compensar");
+        from("kafka:pagosTdcCompensacion?brokers=localhost:9092")
+                .log("Compensando pago fallido: ${body}");
+
 
         from("direct:compensacion")
-                .log("Ejecutando lógica de compensación...")
+                .log("Ejecutando lógica de compensación...")//logica -------------
+
                 .to("kafka:pagosTdcCompensacion?brokers=localhost:9092");
+
+        from("kafka:pagos.tdc.retry?brokers=localhost:9092")
+                .log("🔁 Reintentando compensación desde retry topic...")
+                .setHeader("Content-Type", constant("application/json"))
+                .marshal().json(JsonLibrary.Jackson)
+                .toD("http://localhost:8090/mock-pago-aleatorio?bridgeEndpoint=true&httpMethod=POST")
+                .process(exchange -> {
+                    Map<String, Object> evento = new HashMap<>();
+                    evento.put("evento", "pago_exitoso");
+                    evento.put("timestamp", Instant.now().toString());
+                    evento.put("mensaje", "El pago fue exitoso");
+                    evento.put("idTransaccion", exchange.getIn().getHeader("idTransaccion")); // opcional
+                    exchange.getIn().setBody(evento);
+                })
+
+                .marshal().json()
+                .to("kafka:trazabilidad-events?brokers=localhost:9092")
+                .to("direct:notificar", "direct:auditar")
+                .end()
+                .to("kafka:pagosTdcOK?brokers=localhost:9092");
+
+
+
 
         from("direct:dlq")
                 .log("Mensaje enviado a DLQ")
                 .to("kafka:pagosTdcDlq?brokers=localhost:9092");
+
+        from("kafka:pagosTdcDlq?brokers=localhost:9092")
+               // logica
+                .to("direct:compensacion");
 
         from("direct:notificar")
                 .log("Notificando al cliente del pago... ${body}");
@@ -151,24 +166,7 @@ public class PagoTdcRoute extends RouteBuilder {
 
 
 
-//        from("direct:procesarPago")
-//                .log("Procesando pago...")
-//                .doTry()
-//                .to("http://localhost:8081/servicio/pago")
-//                .multicast().parallelProcessing()
-//                .to("direct:notificar", "direct:auditar")
-//                .endDoTry()
-//                .to("kafka:pagos.tdc.ok?brokers=localhost:9092")
-//                .doCatch (Exception.class)
-//                .log("Error en el pago: ${exception.message}")
-//                .to("kafka:pagos.tdc.retry?brokers=localhost:9092")
-//                .end();
-//
-//        from("direct:notificar")
-//                .log("Notificando al cliente del pago...");
-//
-//        from("direct:auditar")
-//                .log("Auditando operación para cumplimiento...");
+
 
     }
 }
